@@ -358,6 +358,56 @@ function lerHolerite(texto){
   return achado;
 }
 
+// ===== Leitura de conta / boleto =====
+const EMPRESAS = [
+  ['Enel', 'Contas'], ['Cemig', 'Contas'], ['Light', 'Contas'], ['Copel', 'Contas'], ['Celesc', 'Contas'], ['CPFL', 'Contas'], ['Coelba', 'Contas'], ['Neoenergia', 'Contas'], ['Equatorial', 'Contas'], ['Energisa', 'Contas'], ['EDP', 'Contas'], ['RGE', 'Contas'],
+  ['Sabesp', 'Contas'], ['Cedae', 'Contas'], ['Águas do Rio', 'Contas'], ['Copasa', 'Contas'], ['Sanepar', 'Contas'], ['Embasa', 'Contas'], ['Compesa', 'Contas'], ['Corsan', 'Contas'], ['Caesb', 'Contas'], ['Cagece', 'Contas'],
+  ['Comgás', 'Contas'], ['Naturgy', 'Contas'], ['Vivo', 'Contas'], ['Claro', 'Contas'], ['TIM', 'Contas'], ['Oi', 'Contas'], ['NET', 'Contas'], ['Sky', 'Contas'],
+  ['Nubank', 'Outros'], ['Itaú', 'Outros'], ['Bradesco', 'Outros'], ['Santander', 'Outros'], ['Caixa', 'Outros'], ['Banco do Brasil', 'Outros'], ['Inter', 'Outros'], ['C6', 'Outros'], ['PicPay', 'Outros'], ['Mercado Pago', 'Outros'],
+  ['Unimed', 'Saúde'], ['Amil', 'Saúde'], ['Hapvida', 'Saúde'], ['SulAmérica', 'Saúde'], ['Condomínio', 'Moradia'], ['Aluguel', 'Moradia'], ['IPTU', 'Moradia'], ['IPVA', 'Transporte'], ['Escola', 'Educação'], ['Faculdade', 'Educação'],
+];
+const semAcento = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+function dataISO(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+// Linha digitável: boleto bancário (47 dígitos) ou conta de consumo/tributo (48 dígitos, começa com 8)
+function lerCodigoBarras(texto){
+  const cands = (texto.replace(/[ .\-]/g, ' ').match(/\d[\d ]{43,60}\d/g) || []).map(s => s.replace(/\s/g, '')).filter(s => s.length === 47 || s.length === 48);
+  for (const d of cands){
+    if (d.length === 47 && d[0] !== '8'){
+      const fator = +d.slice(33, 37), valor = +d.slice(37) / 100;
+      let venc = null;
+      // fator de vencimento: reiniciou em 1000 no dia 22/02/2025
+      if (fator >= 1000){ const d0 = new Date(2025, 1, 22); d0.setDate(d0.getDate() + fator - 1000); venc = dataISO(d0); }
+      return { valor: valor || undefined, vencimento: venc, tipo: 'boleto' };
+    }
+    if (d.length === 48 && d[0] === '8'){
+      const cod = d.slice(0, 11) + d.slice(12, 23) + d.slice(24, 35) + d.slice(36, 47);
+      const valor = (cod[2] === '6' || cod[2] === '8') ? +cod.slice(4, 15) / 100 : undefined;
+      return { valor: valor || undefined, vencimento: null, tipo: 'convenio' };
+    }
+  }
+  return null;
+}
+function lerConta(texto){
+  const t = texto || '';
+  const linhas = t.split(/\n/).map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const r = {};
+  const valorPor = re => { for (let i = 0; i < linhas.length; i++){ if (re.test(linhas[i])){ const v = (linhas[i].match(MONEY) || linhas[i + 1]?.match(MONEY) || []); if (v.length) return toNum(v[v.length - 1]); } } };
+  r.valor = valorPor(/total a pagar|valor a pagar|valor do documento|valor cobrado|total da fatura|valor total|total geral|\(=\)\s*valor/i) ?? valorPor(/\btotal\b|valor/i);
+  const datas = []; for (let i = 0; i < linhas.length; i++){ if (/venc/i.test(linhas[i])){ const m = (linhas[i] + ' ' + (linhas[i + 1] || '')).match(/(\d{2})\/(\d{2})\/(\d{2,4})/); if (m) datas.push(`${m[3].length === 2 ? '20' + m[3] : m[3]}-${m[2]}-${m[1]}`); } }
+  if (datas.length) r.vencimento = datas[0];
+  const cb = lerCodigoBarras(t);
+  if (cb){ if (cb.valor && !r.valor) r.valor = cb.valor; if (cb.vencimento && !r.vencimento) r.vencimento = cb.vencimento; r.codigo = cb.tipo; }
+  const tn = semAcento(t);
+  const emp = EMPRESAS.find(([n]) => new RegExp('\\b' + semAcento(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(tn));
+  if (emp){ r.nome = emp[0]; r.cat = emp[1]; }
+  if (/fatura.*cart|cart[aã]o de cr[eé]dito/i.test(t)){ r.nome = (r.nome ? 'Fatura ' + r.nome : 'Fatura do cartão'); r.cat = 'Outros'; r.cartao = true; }
+  else if (/energia|kwh/i.test(t) && !r.nome){ r.nome = 'Conta de luz'; r.cat = 'Contas'; }
+  else if (/[aá]gua|esgoto|m³|m3/i.test(t) && !r.nome){ r.nome = 'Conta de água'; r.cat = 'Contas'; }
+  else if (/internet|telefon|celular|banda larga/i.test(t) && !r.nome){ r.nome = 'Internet / telefone'; r.cat = 'Contas'; }
+  if (emp && r.cat === 'Contas' && /kwh|energia/i.test(t)) r.nome = 'Luz (' + emp[0] + ')';
+  else if (emp && r.cat === 'Contas' && /[aá]gua|esgoto/i.test(t)) r.nome = 'Água (' + emp[0] + ')';
+  return r;
+}
 
 </script>
 <script>
@@ -407,7 +457,7 @@ const brl = v => (v < 0 ? '−' : '') + 'R$ ' + Math.abs(v || 0).toLocaleString(
 const pct = v => (v * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + '%';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const num = v => { if (typeof v === 'number') return v; const s = String(v || '').replace(/[R$\s]/g, ''); if (!s) return 0; return +(s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s) || 0; };
-const vf = v => v ? String(Math.round(v * 100) / 100).replace('.', ',') : '';
+const vf = v => { if (!v) return ''; const r = Math.round(v * 100) / 100; return Number.isInteger(r) ? String(r) : r.toFixed(2).replace('.', ','); };
 const $ = s => document.querySelector(s);
 const ic = (n, cls = '') => `<svg class="ic ${cls}"><use href="#${n}"/></svg>`;
 const catIc = c => ic('c-' + (CATS.includes(c) ? c : 'Outros'));
@@ -590,10 +640,7 @@ async function carregaWorker(){
   if (window.pdfjsWorker) return;
   await new Promise((ok, err) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; s.onload = ok; s.onerror = () => err(new Error('não consegui carregar o leitor de PDF.')); document.head.appendChild(s); });
 }
-async function lerPDF(file){
-  if (!file) return;
-  const out = $('#holRes'); out.innerHTML = '<p class="hint">Lendo o holerite…</p>';
-  try {
+async function textoDoPDF(file){
     if (!window.pdfjsLib) throw new Error('o leitor de PDF não carregou. Verifique a internet.');
     await carregaWorker();
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -606,7 +653,13 @@ async function lerPDF(file){
       texto += Object.keys(linhas).sort((a, b) => b - a).map(y => linhas[y].sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' ')).join('\n') + '\n';
     }
     if (!texto.replace(/\s/g, '')) throw new Error('este PDF é uma imagem escaneada. Use a opção de colar o texto.');
-    processarTexto(texto);
+    return texto;
+}
+async function lerPDF(file){
+  if (!file) return;
+  const out = $('#holRes'); out.innerHTML = '<p class="hint">Lendo o holerite…</p>';
+  try {
+    processarTexto(await textoDoPDF(file));
   } catch (e) { out.innerHTML = `<p class="hint">Não deu para ler: ${esc(e.message)} Você pode preencher os campos manualmente.</p>`; }
 }
 let ACHADO = {};
@@ -676,6 +729,15 @@ V.gastos = () => {
   <div class="card soft"><h3><span class="ibox" style="background:#fff">${ic('i-target')}</span>Seu limite por dia</h3>
     <p>Depois das contas fixas e parcelas, você pode gastar até <b class="money">${brl(Math.max(0, dispDia))}</b> por dia sem se endividar.</p>
     <p class="explain">Neste mês sua média está em <b>${brl(mediaDia)}</b> por dia. ${mediaDia > dispDia ? '<span class="neg"><b>Acima do limite.</b></span>' : '<span class="pos"><b>Dentro do limite. Continue assim!</b></span>'}</p></div>
+  <div class="card"><h3><span class="ibox gold">${ic('i-upload')}</span>Carregar conta ou boleto</h3>
+    <div class="drop"><b>Envie o PDF da conta, boleto ou fatura</b><span class="explain">Luz, água, internet, condomínio, fatura do cartão, carnê… Lemos o valor, o vencimento e a empresa. O arquivo fica só no seu aparelho.</span>
+      <label for="contaIn" class="btn" style="cursor:pointer">${ic('i-upload')}Escolher PDF da conta<input id="contaIn" type="file" accept="application/pdf,.pdf" hidden onchange="lerContaPDF(this.files[0]);this.value=''"></label></div>
+    <details><summary>Tem só foto, ou quer usar o código de barras? Cole o texto</summary>
+      <p class="explain">Cole o texto da conta (no celular: segure o dedo sobre a foto e use "Copiar texto") ou a <b>linha digitável</b> do boleto, aqueles números grandes. Pela linha digitável já sabemos o valor e, em boletos de banco, o vencimento.</p>
+      <textarea id="txtConta" rows="4" placeholder="Ex.: 23790.12345 60000.000005 00000.000000 1 16260000015260"></textarea>
+      <button class="light" onclick="mostraConta(lerConta($('#txtConta').value))">Ler texto colado</button></details>
+    <div id="contaRes"></div>
+  </div>
   <div class="card"><div class="row" style="justify-content:space-between"><h3><span class="ibox blue">${ic('i-receipt')}</span>Contas fixas de ${nomeMes(S.mes)}</h3><span class="tag ${pagas === S.fixas.length && pagas ? 'good' : 'gray'}">${pagas} de ${S.fixas.length} pagas</span></div>
     <div class="list">${S.fixas.length ? [...S.fixas].sort((a, b) => (a.dia || 99) - (b.dia || 99)).map(itemFixa).join('') : '<div class="empty">Adicione aluguel, luz, água, internet, escola…</div>'}</div>
     <p class="explain">Total do mês: <b class="money">${brl(r.fixas)}</b>${r.jurosAtraso > 0 ? ` · juros por atraso: <b class="neg">${brl(r.jurosAtraso)}</b>` : ''}</p>
@@ -785,6 +847,50 @@ function mostraExtrato(){
   <button onclick="importaExtrato()">${ic('i-check')}Importar ${sel.length} gastos (${brl(sel.reduce((a, e) => a + e.valor, 0))})</button>`;
 }
 function importaExtrato(){ const sel = EXT.filter(e => e.ok); sel.forEach(e => S.gastos.push({ id: uid() + e.i, nome: e.nome, valor: e.valor, cat: e.cat, data: e.data })); EXT = []; S.exemplo = false; salvar(); render(); toast(`${sel.length} gastos importados`); }
+
+// ===== Conta / boleto =====
+async function lerContaPDF(file){
+  if (!file) return;
+  const out = $('#contaRes'); out.innerHTML = '<p class="hint">Lendo a conta…</p>';
+  try { mostraConta(lerConta(await textoDoPDF(file))); }
+  catch (e) { out.innerHTML = `<p class="hint">Não deu para ler: ${esc(e.message)} Você pode colar o texto ou a linha digitável.</p>`; }
+}
+function mostraConta(c){
+  const out = $('#contaRes');
+  if (!c.valor && !c.vencimento && !c.nome){ out.innerHTML = '<p class="hint">Não encontramos valor nem vencimento. Confira o arquivo ou preencha a conta manualmente abaixo.</p>'; return; }
+  const venc = c.vencimento || hojeISO;
+  const atrasada = c.vencimento && c.vencimento < hojeISO;
+  const catOpts = CATS.map(x => `<option ${x === (c.cat || 'Contas') ? 'selected' : ''}>${x}</option>`).join('');
+  out.innerHTML = `<form class="card soft" onsubmit="event.preventDefault();salvaConta(this)"><h3>Confira o que encontramos</h3>
+    <p class="explain">Corrija o que precisar e escolha onde salvar.${c.codigo ? ' Valor lido do código de barras.' : ''}</p>
+    ${c.cartao ? '<p class="hint gold">É uma fatura de cartão. Se você já anota as compras do cartão como gastos do dia, salve a fatura só como dívida ou não salve, para não contar duas vezes.</p>' : ''}
+    <div class="fields">
+      <label for="c_nome">Nome da conta<input id="c_nome" name="nome" required value="${esc(c.nome || '')}" placeholder="Ex.: conta de luz"></label>
+      <label for="c_valor">Valor da conta (R$)<input id="c_valor" name="valor" inputmode="decimal" required value="${vf(c.valor || 0)}"></label>
+      <label for="c_venc">Vencimento<input id="c_venc" name="venc" type="date" value="${venc}"></label>
+      <label for="c_cat">Categoria<select id="c_cat" name="cat">${catOpts}</select></label>
+    </div>
+    <div class="seg" role="radiogroup" aria-label="Onde salvar" style="width:100%">
+      <label class="check" style="padding:8px 10px"><input type="radio" name="destino" value="fixa" ${c.cartao ? '' : 'checked'}>Conta fixa (repete todo mês)</label>
+      <label class="check" style="padding:8px 10px"><input type="radio" name="destino" value="gasto" ${c.cartao ? 'checked' : ''}>Só deste mês</label>
+    </div>
+    <label class="check" for="c_pago"><input type="checkbox" id="c_pago" name="pago" onchange="$('#c_pagoBox').hidden=!this.checked">Já paguei esta conta</label>
+    <label for="c_vpago" id="c_pagoBox" hidden>Valor pago (R$)<small>${atrasada ? 'O vencimento já passou. Se pagou com atraso, coloque o valor com juros e multa.' : 'Se pagou com atraso, coloque o valor com juros e multa.'}</small><input id="c_vpago" name="vpago" inputmode="decimal" value="${vf(c.valor || 0)}"></label>
+    <button type="submit">${ic('i-check')}Salvar conta</button></form>`;
+}
+function salvaConta(f){
+  const d = form(f), valor = num(d.valor), pago = num(d.vpago) || valor, venc = d.venc || hojeISO;
+  const mes = venc.slice(0, 7), dia = +venc.slice(8, 10);
+  if (d.destino === 'fixa'){
+    const id = uid();
+    S.fixas.push({ id, nome: d.nome, valor, cat: d.cat, dia });
+    if (d.pago) (S.pagos[mes] = S.pagos[mes] || {})[id] = { valor: pago, atraso: pago > valor + 0.005 };
+  } else {
+    S.gastos.push({ id: uid(), nome: d.nome, valor: d.pago ? pago : valor, cat: d.cat, data: venc, atraso: !!d.pago && pago > valor + 0.005, original: d.pago && pago > valor ? valor : 0 });
+  }
+  S.exemplo = false; salvar(); render();
+  toast(d.destino === 'fixa' ? 'Conta fixa adicionada' : 'Conta anotada no mês');
+}
 
 // ===== Dívidas =====
 function itemDivida(d){
